@@ -1,0 +1,222 @@
+---
+title: "STA 141A Final Project"
+author: "Xiaojing Zhou"
+date: "2024-03-07"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+setwd("/Users/vickizhou/Desktop/STA141AProjectData")
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyverse)
+library(caret) 
+library(xgboost)
+library(pROC)
+
+knitr::opts_chunk$set(echo = F, message = F, warning = F)
+
+```
+
+```{r Data structure}
+setwd("/Users/vickizhou/Desktop/STA141AProjectData")
+
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('session',i,'.rds',sep=''))
+  session[[i]]$mouse_name
+  session[[i]]$date_exp
+}
+
+```
+
+## Abstract
+The primary objective of this project is to build a predictive model to predict the outcome (i.e., feedback type) of each trial using the neural activity data (i.e., spike trains in spks), along with the stimuli (the left and right contrasts).
+
+
+
+
+```{r include=FALSE}
+
+```
+
+
+## Data structure
+
+**Summary Information**
+```{r}
+ls(session[[1]])
+```
+There are 8 variables in each session: contrast_left, contrast_right", feedback_type, mouse_name, brain_area, date_exp, spks, time.
+
+```{r }
+get_session_summary <- function(session) {
+  num_trials <- length(session$spks)
+  num_neurons <- sapply(session$spks, function(x) dim(x)[1]) %>% mean()
+  date_exp <- session$date_exp[1]
+  mouse_name <- session$mouse_name[1]
+  feedback_types <- table(session$feedback_type)
+  brain_areas <- table(session$brain_area)
+  
+  return(list(
+    NumTrials = num_trials,
+    NumNeurons = num_neurons,
+    DateExp = date_exp,
+    MouseName = mouse_name,
+    FeedbackTypes = feedback_types,
+    BrainAreas = brain_areas
+  ))
+}
+session_summaries <- lapply(session, get_session_summary)
+session_summary_df <- data.frame(
+  SessionID = 1:length(session),
+  NumTrials = sapply(session_summaries, `[[`, "NumTrials"),
+  NumNeurons = sapply(session_summaries, `[[`, "NumNeurons"),
+  DateExp = sapply(session_summaries, `[[`, "DateExp"),
+  MouseName = sapply(session_summaries, `[[`, "MouseName")
+)
+
+head(session_summary_df)
+```
+This table is an overview. s the initial explorations of the dataset, there are insights into the volume of data collected over time across different mice. I can identify trends and notice the diversity of data across sessions and subjects.
+
+```{r include=FALSE}
+ggplot(session_summary_df, aes(x = factor(SessionID), y = NumNeurons, color = MouseName)) +
+  geom_point(size = 3) + 
+  scale_color_manual(values = rainbow(length(unique(session_summary_df$MouseName)))) + # Custom colors
+  labs(title = "Number of Nummber of Neurons by Mouse",
+       x = "Session ID",
+       y = "Number of Trials") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r include=FALSE}
+ggplot(session_summary_df, aes(x = factor(SessionID), y = NumTrials, color = MouseName)) +
+  geom_point(size = 3) +  # Adjust size as needed
+  scale_color_manual(values = rainbow(length(unique(session_summary_df$MouseName)))) + # Custom colors
+  labs(title = "Number of Trials per Session by Mouse",
+       x = "Session ID",
+       y = "Number of Trials") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+**For a selected Trail**
+**Session Choose to Test**
+```{r}
+sc=session_chosen=2
+sc
+```
+**Trial Choose to Test**
+```{r}
+tc=trail_chosen= 2
+tc
+```
+
+
+**Different Regions of The Brain Used**
+```{r}
+table(session[[sc]]$brain_area)
+```
+This table provides a overview of the distribution of neurons across various brain areas for the selected session, indicating the diversity of neural recordings obtained from different functional regions of the brain. This table
+will help researchers to correlate specific neural activities with different brain areas and feedbacks during the experiment.
+
+
+```{r}
+dim(session[[sc]]$spks[[1]])
+```
+In the sleeted session, there is 1070 neurons over 40 time bins.
+
+```{r}
+session[[sc]]$spks[[1]][6,6] 
+session[[sc]]$brain_area[6]
+```
+
+In this particular trial, the 6th neuron, located in the CA1 has a spiking activity during the 6th time bin in this selected session.
+
+\newpage
+
+
+## Part I. Exploratory data analysis
+**Table for Contrast Levels and the Number of Times it was presented on the each side **
+
+This table shows the number of trials for each contrast level(0, 0.25, 0.5, 1), with the side (left or right) the stimulus was presented on.
+```{r}
+Contrast_levels <- c(session[[sc]]$contrast_left, session[[sc]]$contrast_right)
+sides <- c(rep("left", length(session[[sc]]$contrast_left)), 
+           rep("right", length(session[[sc]]$contrast_right)))
+combined_lr <- table(Contrast_levels, sides)
+
+print(combined_lr)
+```
+For instance, at contrast level of 0, there are 133 times on the left and 115 times on the right indicates many trials where no stimulus was shown on either side, more frequently on the left.
+Other values(0.25, 0.5, 1) show the distribution of non-zero contrast levels, which are crucial for testing the mice's decision-making under varying conditions.
+
+**Feedback**
+
+In this feedback table (-1 represent failure, 1 represent success) shows the outcomes of the decisions of mice across all trials in the session.
+-1 indicate trials where the mouse made an incorrect decision.
+1 indicate successful trials where the mouse responded correctly according to the rules.
+```{r}
+table(session[[sc]]$feedback_type)
+```
+In selected trial, there are 92 mouse made an incorrect decision and 159 mouse made correct decision.
+
+
+
+**Spks**
+```{r include=FALSE}
+trial_counts <- length(session[[sc]]$spks)
+
+average_spike_rates <- sapply(1:trial_counts, function(trial_id) mean(session[[sc]]$spks[[trial_id]], na.rm = TRUE))
+```
+
+**average spike_rates **
+```{r}
+overall_average_spike_rate <- mean(average_spike_rates, na.rm = TRUE)
+overall_average_spike_rate
+```
+
+```{r}
+plot(average_spike_rates, type = "b", main = "Average Spike Rates for Selected Session", xlab = "Trial", ylab = "Average Spike Rate")
+abline(h = overall_average_spike_rate, col = "red", lwd = 2)
+```
+
+
+
+
+
+
+\newpage
+## Part II. Data integration
+
+
+```{r}
+
+```
+
+\newpage
+## Part III. Model training and prediction.
+
+```{r}
+
+```
+
+\newpage
+## Discussion
+```{r}
+
+```
+
+\newpage
+## Appendix
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
+```
